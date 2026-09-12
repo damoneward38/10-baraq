@@ -1,0 +1,12 @@
+// In baraq-frontend/src/pages/Settings/Settings.jsx
+import SyncButton from '../../components/Integration/SyncButton'
+
+// In the integrations tab add
+<div className="chazah-integration-section">
+  <h3>👁️ CHAZAH Intelligence Platform</h3>
+  <p>
+    One button syncs all your BARAQ data to CHAZAH
+    and pulls quantum intelligence back automatically
+  </p>
+  <SyncButton />
+</div>

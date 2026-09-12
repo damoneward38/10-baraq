@@ -1,0 +1,7 @@
+BARAQ ←————————————————→ CHAZAH
+  ↓                          ↓
+Contacts                 Knowledge Graph
+Campaigns                Lead Scores
+Revenue                  Churn Predictions
+Workers                  Revenue Forecast
+                         Quantum Insights

@@ -1,0 +1,582 @@
+// Works In BOTH BARAQ and CHAZAH Frontends
+// frontend/src/components/Integration/SyncButton.jsx
+import React, { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+
+const SyncButton = () => {
+  const [status, setStatus] = useState('idle')
+  const [connected, setConnected] = useState(false)
+  const [lastSync, setLastSync] = useState(null)
+  const [results, setResults] = useState(null)
+  const [showResults, setShowResults] = useState(false)
+  const [intelligence, setIntelligence] = useState(null)
+
+  const BARAQ_API = process.env.REACT_APP_API_URL
+    || 'http://localhost:8000'
+
+  const token = localStorage.getItem('baraq_token')
+    || localStorage.getItem('chazah_token')
+
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  }
+
+  // Check connection on load
+  useEffect(() => {
+    checkConnection()
+  }, [])
+
+  const checkConnection = async () => {
+    try {
+      const res = await fetch(
+        `${BARAQ_API}/api/chazah/status`,
+        { headers }
+      )
+      const data = await res.json()
+      setConnected(data.connected)
+    } catch {
+      setConnected(false)
+    }
+  }
+
+  const runFullSync = async () => {
+    setStatus('syncing')
+    setShowResults(false)
+
+    try {
+      // Step 1 - Push all BARAQ data to CHAZAH
+      const syncRes = await fetch(
+        `${BARAQ_API}/api/chazah/sync/full`,
+        { method: 'POST', headers }
+      )
+      const syncData = await syncRes.json()
+
+      // Wait for sync to process
+      await new Promise(r => setTimeout(r, 3000))
+
+      // Step 2 - Pull all intelligence from CHAZAH
+      setStatus('pulling')
+      const intRes = await fetch(
+        `${BARAQ_API}/api/chazah/intelligence/all`,
+        { headers }
+      )
+      const intData = await intRes.json()
+
+      setResults({
+        synced: syncData,
+        intelligence: intData
+      })
+
+      setIntelligence(intData)
+      setLastSync(new Date().toLocaleTimeString())
+      setStatus('success')
+      setShowResults(true)
+
+      setTimeout(() => setStatus('idle'), 5000)
+
+    } catch (error) {
+      setStatus('error')
+      setTimeout(() => setStatus('idle'), 3000)
+    }
+  }
+
+  const getButtonStyle = () => {
+    const styles = {
+      idle: {
+        background: connected
+          ? 'linear-gradient(135deg, #00b4ff, #7b2fff)'
+          : 'rgba(255,255,255,0.1)',
+        color: connected ? '#fff' : '#666'
+      },
+      syncing: {
+        background: 'linear-gradient(135deg, #ffd700, #ff6b35)',
+        color: '#000'
+      },
+      pulling: {
+        background: 'linear-gradient(135deg, #7b2fff, #00b4ff)',
+        color: '#fff'
+      },
+      success: {
+        background: 'linear-gradient(135deg, #00ff88, #00b4ff)',
+        color: '#000'
+      },
+      error: {
+        background: 'linear-gradient(135deg, #ff2255, #ff6b35)',
+        color: '#fff'
+      }
+    }
+    return styles[status] || styles.idle
+  }
+
+  const getButtonText = () => {
+    const texts = {
+      idle: connected
+        ? '⚡ Sync BARAQ ↔ CHAZAH'
+        : '👁️ Connect CHAZAH First',
+      syncing: '📤 Pushing Data To CHAZAH...',
+      pulling: '📥 Pulling Intelligence...',
+      success: '✅ Sync Complete!',
+      error: '❌ Sync Failed - Retry'
+    }
+    return texts[status]
+  }
+
+  return (
+    <div className="sync-button-container">
+
+      {/* Connection Status */}
+      <div className="sync-status-bar">
+        <div className={`sync-indicator ${connected ? 'connected' : 'disconnected'}`}>
+          <div className={`sync-dot ${connected ? 'pulse' : ''}`} />
+          <span>
+            {connected
+              ? 'CHAZAH Connected'
+              : 'CHAZAH Not Connected'
+            }
+          </span>
+        </div>
+        {lastSync && (
+          <span className="sync-last">
+            Last sync: {lastSync}
+          </span>
+        )}
+        <button
+          className="sync-refresh-btn"
+          onClick={checkConnection}
+        >
+          🔄
+        </button>
+      </div>
+
+      {/* Main Sync Button */}
+      <motion.button
+        className="main-sync-button"
+        style={getButtonStyle()}
+        onClick={runFullSync}
+        disabled={
+          !connected ||
+          status === 'syncing' ||
+          status === 'pulling'
+        }
+        whileHover={connected ? { scale: 1.02 } : {}}
+        whileTap={connected ? { scale: 0.98 } : {}}
+      >
+        {(status === 'syncing' || status === 'pulling') && (
+          <motion.div
+            className="sync-spinner"
+            animate={{ rotate: 360 }}
+            transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+          />
+        )}
+        {getButtonText()}
+      </motion.button>
+
+      {/* Sync Steps Indicator */}
+      <AnimatePresence>
+        {(status === 'syncing' || status === 'pulling') && (
+          <motion.div
+            className="sync-steps"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+          >
+            <div className={`sync-step ${status === 'syncing' ? 'active' : 'done'}`}>
+              <span className="step-icon">
+                {status === 'syncing' ? '⏳' : '✅'}
+              </span>
+              <span>Pushing contacts campaigns and revenue to CHAZAH</span>
+            </div>
+            <div className={`sync-step ${status === 'pulling' ? 'active' : status === 'success' ? 'done' : 'waiting'}`}>
+              <span className="step-icon">
+                {status === 'pulling' ? '⏳' : status === 'success' ? '✅' : '⏸️'}
+              </span>
+              <span>Pulling quantum intelligence back to BARAQ</span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Results Panel */}
+      <AnimatePresence>
+        {showResults && results && (
+          <motion.div
+            className="sync-results-panel"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+          >
+            <div className="srp-header">
+              <h3>✅ Sync Complete</h3>
+              <button
+                className="srp-close"
+                onClick={() => setShowResults(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* What Was Synced */}
+            <div className="srp-section">
+              <div className="srp-section-title">
+                📤 Pushed To CHAZAH
+              </div>
+              <div className="srp-items">
+                {results.synced?.syncing?.map(
+                  (item, i) => (
+                    <div key={i} className="srp-item">
+                      <span>✓</span>
+                      <span>{item}</span>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+
+            {/* Intelligence Received */}
+            {results.intelligence && (
+              <div className="srp-section">
+                <div className="srp-section-title">
+                  📥 Intelligence Received From CHAZAH
+                </div>
+
+                {results.intelligence.lead_scores?.scores && (
+                  <div className="srp-intelligence-item">
+                    <span className="sri-icon">🎯</span>
+                    <div>
+                      <div className="sri-title">
+                        Lead Scores Updated
+                      </div>
+                      <div className="sri-value">
+                        {results.intelligence.lead_scores.scores.length} contacts scored
+                        •{' '}
+                        {results.intelligence.lead_scores.hot_leads || 0} hot leads found
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {results.intelligence.churn_predictions?.at_risk && (
+                  <div className="srp-intelligence-item warning">
+                    <span className="sri-icon">⚠️</span>
+                    <div>
+                      <div className="sri-title">
+                        Churn Risk Analysis
+                      </div>
+                      <div className="sri-value">
+                        {results.intelligence.churn_predictions.at_risk.length} accounts at risk
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {results.intelligence.revenue_forecast?.forecasts && (
+                  <div className="srp-intelligence-item positive">
+                    <span className="sri-icon">💰</span>
+                    <div>
+                      <div className="sri-title">
+                        Revenue Forecast Updated
+                      </div>
+                      <div className="sri-value">
+                        Next month:{' '}
+                        {results.intelligence.revenue_forecast.forecasts[0]?.formatted || '—'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {results.intelligence.insights?.insights && (
+                  <div className="srp-intelligence-item">
+                    <span className="sri-icon">⚛️</span>
+                    <div>
+                      <div className="sri-title">
+                        Quantum Insights
+                      </div>
+                      <div className="sri-value">
+                        {results.intelligence.insights.insights.length} new insights available
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="srp-footer">
+              <span>
+                CHAZAH Knowledge Graph Updated
+              </span>
+              <button
+                className="srp-view-btn"
+                onClick={() => window.open('http://localhost:3001', '_blank')}
+              >
+                Open CHAZAH →
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sync CSS */}
+      <style>{`
+        .sync-button-container {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          width: 100%;
+          max-width: 480px;
+        }
+
+        .sync-status-bar {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 14px;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 8px;
+          font-size: 12px;
+        }
+
+        .sync-indicator {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          flex: 1;
+        }
+
+        .sync-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: #ff2255;
+        }
+
+        .sync-indicator.connected .sync-dot {
+          background: #00ff88;
+        }
+
+        .sync-dot.pulse {
+          animation: syncPulse 2s infinite;
+        }
+
+        @keyframes syncPulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(0.8); }
+        }
+
+        .sync-indicator.connected {
+          color: #00ff88;
+        }
+
+        .sync-indicator.disconnected {
+          color: rgba(255,255,255,0.4);
+        }
+
+        .sync-last {
+          font-size: 11px;
+          color: rgba(255,255,255,0.3);
+        }
+
+        .sync-refresh-btn {
+          background: none;
+          border: none;
+          cursor: pointer;
+          font-size: 14px;
+          color: rgba(255,255,255,0.4);
+          padding: 2px;
+          transition: transform 0.2s;
+        }
+
+        .sync-refresh-btn:hover {
+          transform: rotate(180deg);
+          color: #00b4ff;
+        }
+
+        .main-sync-button {
+          width: 100%;
+          padding: 16px 24px;
+          border: none;
+          border-radius: 12px;
+          font-size: 15px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: all 0.3s;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          letter-spacing: 0.3px;
+          position: relative;
+          overflow: hidden;
+        }
+
+        .main-sync-button:disabled {
+          cursor: not-allowed;
+        }
+
+        .sync-spinner {
+          width: 18px;
+          height: 18px;
+          border: 2px solid rgba(255,255,255,0.3);
+          border-top-color: #fff;
+          border-radius: 50%;
+        }
+
+        .sync-steps {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 14px;
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 10px;
+          overflow: hidden;
+        }
+
+        .sync-step {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 12px;
+          color: rgba(255,255,255,0.5);
+        }
+
+        .sync-step.active {
+          color: #ffd700;
+        }
+
+        .sync-step.done {
+          color: #00ff88;
+        }
+
+        .sync-step.waiting {
+          color: rgba(255,255,255,0.2);
+        }
+
+        .step-icon { font-size: 14px; }
+
+        .sync-results-panel {
+          background: rgba(13,13,43,0.95);
+          border: 1px solid rgba(0,180,255,0.3);
+          border-radius: 14px;
+          overflow: hidden;
+        }
+
+        .srp-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 14px 18px;
+          border-bottom: 1px solid rgba(0,180,255,0.15);
+        }
+
+        .srp-header h3 {
+          font-size: 15px;
+          font-weight: 700;
+          color: #00ff88;
+        }
+
+        .srp-close {
+          background: none;
+          border: none;
+          color: rgba(255,255,255,0.4);
+          cursor: pointer;
+          font-size: 14px;
+        }
+
+        .srp-section {
+          padding: 14px 18px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .srp-section-title {
+          font-size: 11px;
+          font-weight: 700;
+          color: rgba(0,180,255,0.6);
+          text-transform: uppercase;
+          letter-spacing: 1px;
+          margin-bottom: 10px;
+        }
+
+        .srp-items {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .srp-item {
+          display: flex;
+          gap: 8px;
+          font-size: 12px;
+          color: rgba(255,255,255,0.6);
+        }
+
+        .srp-item span:first-child {
+          color: #00ff88;
+        }
+
+        .srp-intelligence-item {
+          display: flex;
+          gap: 10px;
+          align-items: flex-start;
+          padding: 10px;
+          background: rgba(0,180,255,0.05);
+          border-radius: 8px;
+          margin-bottom: 8px;
+          border: 1px solid rgba(0,180,255,0.15);
+        }
+
+        .srp-intelligence-item.warning {
+          background: rgba(255,215,0,0.05);
+          border-color: rgba(255,215,0,0.2);
+        }
+
+        .srp-intelligence-item.positive {
+          background: rgba(0,255,136,0.05);
+          border-color: rgba(0,255,136,0.2);
+        }
+
+        .sri-icon { font-size: 18px; }
+
+        .sri-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: rgba(255,255,255,0.8);
+          margin-bottom: 3px;
+        }
+
+        .sri-value {
+          font-size: 11px;
+          color: rgba(255,255,255,0.4);
+        }
+
+        .srp-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 12px 18px;
+          font-size: 11px;
+          color: rgba(255,255,255,0.3);
+        }
+
+        .srp-view-btn {
+          background: rgba(0,180,255,0.15);
+          border: 1px solid rgba(0,180,255,0.3);
+          border-radius: 6px;
+          color: #00b4ff;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 6px 14px;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .srp-view-btn:hover {
+          background: rgba(0,180,255,0.25);
+        }
+      `}</style>
+    </div>
+  )
+}
+
+export default SyncButton

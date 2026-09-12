@@ -1,0 +1,9 @@
+// In baraq-frontend/src/pages/Dashboard/Dashboard.jsx
+// Add at the top of imports
+import SyncButton from '../../components/Integration/SyncButton'
+
+// Add inside the Dashboard component JSX
+<div className="baraq-chazah-sync-section">
+  <h3>⚡ BARAQ ↔ CHAZAH Intelligence Sync</h3>
+  <SyncButton />
+</div>

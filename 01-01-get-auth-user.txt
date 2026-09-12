@@ -1,0 +1,511 @@
+# baraq-backend/routes/chazah_integration.py
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi import BackgroundTasks, Request
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+import httpx
+import logging
+from database import get_db
+from models import Contact, Campaign, Invoice, User
+from config import settings
+
+router = APIRouter()
+logger = logging.getLogger("BARAQ.CHAZAH")
+
+# ─────────────────────────────────────────
+# SHARED CONFIG
+# ─────────────────────────────────────────
+CHAZAH_URL = getattr(settings, 'CHAZAH_API_URL', 'http://localhost:8001')
+CHAZAH_KEY = getattr(settings, 'CHAZAH_API_KEY', 'shared_secret_key_change_this')
+
+def get_auth_user(authorization: str, db: Session):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.replace("Bearer ", "")
+    from routes.auth import get_current_user
+    return get_current_user(token, db)
+
+# ─────────────────────────────────────────
+# CORE HTTP HELPERS
+# ─────────────────────────────────────────
+async def push_to_chazah(endpoint: str, data: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{CHAZAH_URL}{endpoint}",
+                json=data,
+                headers={
+                    "Authorization": f"Bearer {CHAZAH_KEY}",
+                    "X-Source": "BARAQ",
+                    "Content-Type": "application/json"
+                }
+            )
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            return {"success": False, "error": f"Status {response.status_code}"}
+    except httpx.ConnectError:
+        logger.warning("CHAZAH not reachable - running standalone")
+        return {"success": False, "error": "CHAZAH not connected"}
+    except Exception as e:
+        logger.error(f"CHAZAH push error: {e}")
+        return {"success": False, "error": str(e)}
+
+async def pull_from_chazah(endpoint: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{CHAZAH_URL}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {CHAZAH_KEY}",
+                    "X-Source": "BARAQ"
+                }
+            )
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            return {"success": False, "error": f"Status {response.status_code}"}
+    except httpx.ConnectError:
+        logger.warning("CHAZAH not reachable - running standalone")
+        return {"success": False, "error": "CHAZAH not connected"}
+    except Exception as e:
+        logger.error(f"CHAZAH pull error: {e}")
+        return {"success": False, "error": str(e)}
+
+# ─────────────────────────────────────────
+# CONNECTION STATUS
+# ─────────────────────────────────────────
+@router.get("/status")
+async def get_chazah_connection_status():
+    """Check if CHAZAH is reachable"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{CHAZAH_URL}/api/health"
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "connected": True,
+                    "chazah_status": data.get("status"),
+                    "chazah_version": data.get("version"),
+                    "quantum_core": data.get("quantum_core"),
+                    "chazah_url": CHAZAH_URL,
+                    "checked_at": datetime.utcnow().isoformat()
+                }
+    except Exception:
+        pass
+
+    return {
+        "connected": False,
+        "chazah_url": CHAZAH_URL,
+        "message": "CHAZAH not reachable. Make sure CHAZAH is running.",
+        "checked_at": datetime.utcnow().isoformat()
+    }
+
+# ─────────────────────────────────────────
+# FULL SYNC - ONE BUTTON DOES EVERYTHING
+# ─────────────────────────────────────────
+@router.post("/sync/full")
+async def full_sync_to_chazah(
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """One button - syncs ALL BARAQ data to CHAZAH"""
+    user = get_auth_user(authorization, db)
+
+    background_tasks.add_task(
+        run_full_sync,
+        user_id=user.id,
+        db=db
+    )
+
+    return {
+        "message": "Full sync started in background",
+        "syncing": [
+            "Contacts",
+            "Campaigns",
+            "Invoices",
+            "Lead Activity"
+        ],
+        "started_at": datetime.utcnow().isoformat(),
+        "note": "Intelligence will flow back automatically"
+    }
+
+async def run_full_sync(user_id: int, db: Session):
+    """Background task - syncs everything"""
+    logger.info(f"Starting full sync for user {user_id}")
+
+    # Sync Contacts
+    contacts = db.query(Contact).filter(
+        Contact.owner_id == user_id
+    ).all()
+
+    for contact in contacts:
+        await push_to_chazah(
+            "/api/baraq/ingest/contact",
+            {
+                "baraq_user_id": user_id,
+                "contact_id": contact.id,
+                "first_name": contact.first_name or "",
+                "last_name": contact.last_name or "",
+                "email": contact.email or "",
+                "phone": contact.phone or "",
+                "status": str(contact.status.value) if contact.status else "New Lead",
+                "source": contact.source or "",
+                "lead_score": contact.lead_score or 0,
+                "deal_value": float(contact.deal_value or 0),
+                "tags": contact.tags or [],
+                "opted_in_email": contact.opted_in_email,
+                "opted_in_sms": contact.opted_in_sms,
+                "created_at": contact.created_at.isoformat() if contact.created_at else None
+            }
+        )
+
+    # Sync Campaigns
+    campaigns = db.query(Campaign).filter(
+        Campaign.owner_id == user_id
+    ).all()
+
+    for campaign in campaigns:
+        await push_to_chazah(
+            "/api/baraq/ingest/campaign",
+            {
+                "baraq_user_id": user_id,
+                "campaign_id": campaign.id,
+                "name": campaign.name,
+                "channel": campaign.channel,
+                "status": str(campaign.status.value) if campaign.status else "Draft",
+                "total_sent": campaign.total_sent or 0,
+                "total_opened": campaign.total_opened or 0,
+                "total_clicked": campaign.total_clicked or 0,
+                "created_at": campaign.created_at.isoformat() if campaign.created_at else None
+            }
+        )
+
+    # Sync Revenue
+    invoices = db.query(Invoice).filter(
+        Invoice.owner_id == user_id,
+        Invoice.status == "Paid"
+    ).all()
+
+    for invoice in invoices:
+        await push_to_chazah(
+            "/api/baraq/ingest/revenue",
+            {
+                "baraq_user_id": user_id,
+                "invoice_id": invoice.id,
+                "invoice_number": invoice.invoice_number,
+                "client_name": invoice.client_name,
+                "client_email": invoice.client_email,
+                "total": float(invoice.total or 0),
+                "currency": invoice.currency or "USD",
+                "status": str(invoice.status.value) if invoice.status else "Paid",
+                "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
+                "created_at": invoice.created_at.isoformat() if invoice.created_at else None
+            }
+        )
+
+    logger.info(
+        f"Full sync complete for user {user_id}: "
+        f"{len(contacts)} contacts, "
+        f"{len(campaigns)} campaigns, "
+        f"{len(invoices)} invoices"
+    )
+
+# ─────────────────────────────────────────
+# INDIVIDUAL SYNCS
+# ─────────────────────────────────────────
+@router.post("/sync/contacts")
+async def sync_contacts(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Sync only contacts to CHAZAH"""
+    user = get_auth_user(authorization, db)
+    contacts = db.query(Contact).filter(
+        Contact.owner_id == user.id
+    ).all()
+
+    synced = 0
+    failed = 0
+    for contact in contacts:
+        result = await push_to_chazah(
+            "/api/baraq/ingest/contact",
+            {
+                "baraq_user_id": user.id,
+                "contact_id": contact.id,
+                "first_name": contact.first_name or "",
+                "last_name": contact.last_name or "",
+                "email": contact.email or "",
+                "phone": contact.phone or "",
+                "status": str(contact.status.value) if contact.status else "New Lead",
+                "source": contact.source or "",
+                "lead_score": contact.lead_score or 0,
+                "deal_value": float(contact.deal_value or 0),
+                "tags": contact.tags or []
+            }
+        )
+        if result.get("success"):
+            synced += 1
+        else:
+            failed += 1
+
+    return {
+        "synced": synced,
+        "failed": failed,
+        "total": len(contacts),
+        "message": f"Synced {synced}/{len(contacts)} contacts to CHAZAH"
+    }
+
+@router.post("/sync/campaigns")
+async def sync_campaigns(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Sync only campaigns to CHAZAH"""
+    user = get_auth_user(authorization, db)
+    campaigns = db.query(Campaign).filter(
+        Campaign.owner_id == user.id
+    ).all()
+
+    synced = 0
+    for campaign in campaigns:
+        result = await push_to_chazah(
+            "/api/baraq/ingest/campaign",
+            {
+                "baraq_user_id": user.id,
+                "campaign_id": campaign.id,
+                "name": campaign.name,
+                "channel": campaign.channel,
+                "total_sent": campaign.total_sent or 0,
+                "total_opened": campaign.total_opened or 0
+            }
+        )
+        if result.get("success"):
+            synced += 1
+
+    return {
+        "synced": synced,
+        "total": len(campaigns),
+        "message": f"Synced {synced} campaigns"
+    }
+
+@router.post("/sync/revenue")
+async def sync_revenue(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Sync only revenue data to CHAZAH"""
+    user = get_auth_user(authorization, db)
+    invoices = db.query(Invoice).filter(
+        Invoice.owner_id == user.id
+    ).all()
+
+    synced = 0
+    total_value = 0
+    for invoice in invoices:
+        result = await push_to_chazah(
+            "/api/baraq/ingest/revenue",
+            {
+                "baraq_user_id": user.id,
+                "invoice_id": invoice.id,
+                "invoice_number": invoice.invoice_number,
+                "client_name": invoice.client_name,
+                "total": float(invoice.total or 0),
+                "status": str(invoice.status.value) if invoice.status else "Draft"
+            }
+        )
+        if result.get("success"):
+            synced += 1
+            total_value += float(invoice.total or 0)
+
+    return {
+        "synced": synced,
+        "total_value_synced": f"${total_value:,.2f}",
+        "message": f"Synced {synced} invoices"
+    }
+
+# ─────────────────────────────────────────
+# PULL INTELLIGENCE FROM CHAZAH
+# ─────────────────────────────────────────
+@router.get("/intelligence/all")
+async def get_all_intelligence(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Pull ALL intelligence from CHAZAH at once"""
+    user = get_auth_user(authorization, db)
+
+    scores_result = await pull_from_chazah(
+        f"/api/baraq/intelligence/lead-scores?user_id={user.id}"
+    )
+    churn_result = await pull_from_chazah(
+        f"/api/baraq/intelligence/churn?user_id={user.id}"
+    )
+    forecast_result = await pull_from_chazah(
+        f"/api/baraq/intelligence/forecast?user_id={user.id}"
+    )
+    insights_result = await pull_from_chazah(
+        f"/api/baraq/intelligence/insights?user_id={user.id}"
+    )
+
+    if scores_result.get("success"):
+        scores = scores_result["data"].get("scores", [])
+        for score_data in scores:
+            contact = db.query(Contact).filter(
+                Contact.id == int(score_data.get("contact_id", 0)),
+                Contact.owner_id == user.id
+            ).first()
+            if contact:
+                contact.lead_score = score_data.get("score", 0)
+        db.commit()
+
+    return {
+        "connected": True,
+        "lead_scores": scores_result.get("data", {}) if scores_result.get("success") else {"message": "CHAZAH offline"},
+        "churn_predictions": churn_result.get("data", {}) if churn_result.get("success") else {"message": "CHAZAH offline"},
+        "revenue_forecast": forecast_result.get("data", {}) if forecast_result.get("success") else {"message": "CHAZAH offline"},
+        "insights": insights_result.get("data", {}) if insights_result.get("success") else {"message": "CHAZAH offline"},
+        "pulled_at": datetime.utcnow().isoformat()
+    }
+
+@router.get("/intelligence/lead-scores")
+async def get_lead_scores(
+    apply_to_crm: bool = True,
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Pull quantum lead scores and optionally apply to CRM"""
+    user = get_auth_user(authorization, db)
+    result = await pull_from_chazah(
+        f"/api/baraq/intelligence/lead-scores?user_id={user.id}"
+    )
+
+    if result.get("success") and apply_to_crm:
+        scores = result["data"].get("scores", [])
+        updated = 0
+        for score_data in scores:
+            contact = db.query(Contact).filter(
+                Contact.id == int(score_data.get("contact_id", 0)),
+                Contact.owner_id == user.id
+            ).first()
+            if contact:
+                contact.lead_score = score_data.get("score", 0)
+                updated += 1
+        db.commit()
+        result["data"]["applied_to_crm"] = updated
+
+    return result.get("data", {
+        "message": "CHAZAH not connected",
+        "scores": []
+    })
+
+@router.get("/intelligence/churn")
+async def get_churn_predictions(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Pull churn predictions from CHAZAH"""
+    user = get_auth_user(authorization, db)
+    result = await pull_from_chazah(
+        f"/api/baraq/intelligence/churn?user_id={user.id}"
+    )
+    return result.get("data", {
+        "message": "CHAZAH not connected",
+        "at_risk": []
+    })
+
+@router.get("/intelligence/forecast")
+async def get_forecast(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Pull revenue forecast from CHAZAH"""
+    user = get_auth_user(authorization, db)
+    result = await pull_from_chazah(
+        f"/api/baraq/intelligence/forecast?user_id={user.id}"
+    )
+    return result.get("data", {
+        "message": "CHAZAH not connected",
+        "forecasts": []
+    })
+
+@router.get("/intelligence/insights")
+async def get_insights(
+    authorization: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Pull quantum insights from CHAZAH"""
+    user = get_auth_user(authorization, db)
+    result = await pull_from_chazah(
+        f"/api/baraq/intelligence/insights?user_id={user.id}"
+    )
+    return result.get("data", {
+        "insights": [
+            {
+                "type": "info",
+                "icon": "👁️",
+                "title": "Connect CHAZAH",
+                "insight": "Connect CHAZAH Intelligence Platform to unlock quantum insights for BARAQ",
+                "action": "Connect Now"
+            }
+        ]
+    })
+
+# ─────────────────────────────────────────
+# RECEIVE WEBHOOKS FROM CHAZAH
+# ─────────────────────────────────────────
+@router.post("/webhook/receive")
+async def receive_chazah_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Receive real time updates pushed from CHAZAH"""
+    payload = await request.json()
+    event_type = payload.get("type")
+    user_id = payload.get("baraq_user_id")
+
+    logger.info(f"Received CHAZAH webhook: {event_type}")
+
+    if event_type == "lead_score_update":
+        scores = payload.get("scores", [])
+        for score_data in scores:
+            contact = db.query(Contact).filter(
+                Contact.id == int(score_data.get("contact_id", 0)),
+                Contact.owner_id == user_id
+            ).first()
+            if contact:
+                contact.lead_score = score_data.get("score", 0)
+        db.commit()
+        return {"received": True, "updated": len(scores)}
+
+    elif event_type == "churn_alert":
+        at_risk = payload.get("at_risk", [])
+        for risk in at_risk:
+            contact = db.query(Contact).filter(
+                Contact.id == int(risk.get("contact_id", 0)),
+                Contact.owner_id == user_id
+            ).first()
+            if contact:
+                tags = contact.tags or []
+                if "Churn Risk" not in tags:
+                    tags.append("Churn Risk")
+                    contact.tags = tags
+        db.commit()
+        return {"received": True, "flagged": len(at_risk)}
+
+    elif event_type == "anomaly_alert":
+        logger.warning(
+            f"Anomaly from CHAZAH: {payload.get('title')}"
+        )
+        return {"received": True, "logged": True}
+
+    elif event_type == "opportunity_found":
+        logger.info(
+            f"Opportunity from CHAZAH: {payload.get('title')}"
+        )
+        return {"received": True, "logged": True}
+
+    return {"received": True, "event_type": event_type}
