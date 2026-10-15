@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BARAQ — CHAZAH Intelligence Sync Portal</title>
 <style>
@@ -127,13 +128,17 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
     <h3>API Configuration</h3>
     <div class="auth-field"><label>BARAQ API URL</label><input type="text" value="http://localhost:8000" id="baraqUrl"></div>
     <div class="auth-field"><label>CHAZAH API URL</label><input type="text" value="http://localhost:8001" id="chazahUrl"></div>
-    <div class="auth-field"><label>Shared API Key</label><input type="password" value="shared_secret_key_change_this" id="apiKey"></div>
+    <div class="auth-field"><label>Shared API Key</label><input type="password" value="" id="apiKey" autocomplete="off" placeholder="Not configured in this static export"></div>
     <button class="auth-btn" onclick="saveConfig()">Save Configuration</button>
   </div>
 </div>
 
 <script>
-const BARAQ_API = 'http://localhost:8000';
+function getBaraqApiBase() {
+  const field = document.getElementById('baraqUrl');
+  const value = field && field.value.trim();
+  return (value || 'http://localhost:8000').replace(/\/+$/, '');
+}
 let connected = false;
 let status = 'idle';
 let lastSyncTime = null;
@@ -179,13 +184,16 @@ function updateIndicator() {
 }
 
 async function checkConnection() {
+  connected = false;
   try {
-    const res = await fetch(BARAQ_API + '/api/chazah/status');
+    const res = await fetch(getBaraqApiBase() + '/api/chazah/status');
+    if (!res.ok) throw new Error('Status API returned HTTP ' + res.status);
     const data = await res.json();
-    connected = data.connected;
-  } catch {
-    // Simulate connection for demo
-    connected = true;
+    connected = data && data.connected === true;
+  } catch (error) {
+    connected = false;
+    const last = document.getElementById('lastSync');
+    if (last) last.textContent = 'CHAZAH status API unavailable';
   }
   updateIndicator();
   updateButtonStyle();
@@ -193,9 +201,22 @@ async function checkConnection() {
 
 function closeResults() { document.getElementById('syncResults').classList.remove('visible'); }
 
+function isValidSyncPayload(data) {
+  if (!data || !Array.isArray(data.synced) || !data.synced.every(item => typeof item === 'string')) return false;
+  const i = data.intelligence;
+  if (!i || typeof i !== 'object') return false;
+  if (i.lead_scores && (!Array.isArray(i.lead_scores.scores) || !Number.isFinite(i.lead_scores.hot_leads))) return false;
+  if (i.churn_predictions && !Array.isArray(i.churn_predictions.at_risk)) return false;
+  if (i.revenue_forecast && (!Array.isArray(i.revenue_forecast.forecasts) || !i.revenue_forecast.forecasts[0] || typeof i.revenue_forecast.forecasts[0].formatted !== 'string')) return false;
+  if (i.insights && !Array.isArray(i.insights.insights)) return false;
+  return true;
+}
+
 async function runFullSync() {
   if (!connected || status === 'syncing' || status === 'pulling') return;
   status = 'syncing';
+  results = null;
+  closeResults();
   updateButtonStyle();
   const steps = document.getElementById('syncSteps');
   const step1 = document.getElementById('step1');
@@ -207,35 +228,30 @@ async function runFullSync() {
   step2.querySelector('.step-icon').textContent = '⏸️';
 
   try {
-    await fetch(BARAQ_API + '/api/chazah/sync/full', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
-    await new Promise(r => setTimeout(r, 2000));
+    const response = await fetch(getBaraqApiBase() + '/api/chazah/sync/full', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }
+    });
+    if (!response.ok) throw new Error('Sync API returned HTTP ' + response.status);
+    const payload = await response.json();
+    if (!isValidSyncPayload(payload)) throw new Error('Sync API returned an unsupported response; no sync success was recorded.');
+    results = payload;
     step1.className = 'sync-step done';
     step1.querySelector('.step-icon').textContent = '✅';
-    step2.className = 'sync-step active';
-    step2.querySelector('.step-icon').textContent = '⏳';
-    status = 'pulling';
-    updateButtonStyle();
-    await new Promise(r => setTimeout(r, 1500));
-
-    results = {
-      synced: ['Contacts', 'Campaigns', 'Invoices', 'Lead Activity'],
-      intelligence: {
-        lead_scores: { scores: [{ contact_id: '1', score: 87, grade: 'A', urgency: 'Contact immediately', quantum_confidence: '94%' }, { contact_id: '2', score: 72, grade: 'B', urgency: 'Follow up within 1 hour', quantum_confidence: '91%' }], hot_leads: 5 },
-        churn_predictions: { at_risk: [{ contact_name: 'Acme Corp', churn_probability: 0.87, risk_level: 'High' }, { contact_name: 'Beta LLC', churn_probability: 0.72, risk_level: 'Medium' }] },
-        revenue_forecast: { forecasts: [{ period: 'Next Month', formatted: '$47,250.00', confidence: '89%' }] },
-        insights: { insights: [{ type: 'opportunity', icon: '⚛️', title: 'Quantum Revenue Opportunity', insight: 'Referral customers show 3.4x higher lifetime value', potential_value: '$150K', confidence: '92%' }, { type: 'warning', icon: '⚠️', title: 'Churn Risk Detected', insight: '12 accounts showing behavioral signals preceding cancellation', potential_value: 'Retain MRR', confidence: '87%' }, { type: 'positive', icon: '📈', title: 'Growth Pattern Found', insight: 'Tuesday campaigns convert 34% better', potential_value: '+34% Conversion', confidence: '91%' }] }
-      }
-    };
-
     step2.className = 'sync-step done';
     step2.querySelector('.step-icon').textContent = '✅';
     status = 'success';
     lastSyncTime = new Date().toLocaleTimeString();
-    document.getElementById('lastSync').textContent = 'Last sync: ' + lastSyncTime;
+    document.getElementById('lastSync').textContent = 'Last sync confirmed by API: ' + lastSyncTime;
     showResults();
+    updateButtonStyle();
     setTimeout(() => { status = 'idle'; updateButtonStyle(); }, 3000);
-  } catch (e) {
+  } catch (error) {
     status = 'error';
+    step1.className = 'sync-step waiting';
+    step1.querySelector('.step-icon').textContent = '⏸️';
+    step2.className = 'sync-step waiting';
+    step2.querySelector('.step-icon').textContent = '⏸️';
+    document.getElementById('lastSync').textContent = 'Sync failed: ' + (error && error.message ? error.message : 'API unavailable');
     updateButtonStyle();
     setTimeout(() => { status = 'idle'; updateButtonStyle(); }, 3000);
   }
@@ -264,7 +280,7 @@ function showResults() {
   document.getElementById('syncResults').classList.add('visible');
 }
 
-function saveConfig() { alert('Configuration saved (demo mode).'); }
+function saveConfig() { alert('Configuration is not saved by this static export. Configure a real backend before using sync.'); }
 
 checkConnection();
 </script>
